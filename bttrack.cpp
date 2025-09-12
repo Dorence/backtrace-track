@@ -59,7 +59,10 @@ void Dump(uint8_t id, std::vector<StackFrames>& records) {
   GetInstance(id).Dump(records);
 }
 
-void Record(uint8_t id) { GetInstance(id).Record(); }
+void __attribute__((optimize("O1"))) Record(uint8_t id) {
+  // use O2/O3 will break Tracker::kSkipFrames
+  GetInstance(id).Record();
+}
 
 // find addr2line using which or whereis
 bool is_addr2line_available() {

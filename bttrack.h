@@ -8,7 +8,7 @@ namespace bttrack {
 // function information at address
 struct Frame {
   void* addr;
-  void* faddr;     // file base address
+  void* faddr;         // file base address
   std::string symbol;  // mangeled symbol name
   std::string func;    // function name
   std::string exec;    // executable name
