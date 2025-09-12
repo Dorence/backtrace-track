@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -7,13 +8,13 @@ namespace bttrack {
 
 // function information at address
 struct Frame {
-  void* addr;
+  void* addr;          // caller address
   void* faddr;         // file base address
   std::string symbol;  // mangeled symbol name
   std::string func;    // function name
   std::string exec;    // executable name
-  std::string file;    // source file name
-  int line;            // line of nearest symbol
+  std::string file;    // source file name (?? if not available)
+  int line;            // line of nearest symbol (-1 if not available)
 };
 
 // stack frames and its count

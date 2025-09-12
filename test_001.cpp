@@ -7,7 +7,7 @@
 void RunCall() { bttrack::Record(0); }
 
 void RunCall2(int any) {
-  bttrack::Record(0);
+  bttrack::Record(0, 100);
   RunCall();
   bttrack::Record(0);
 }
@@ -33,11 +33,15 @@ void Run() {
 }
 
 void Print(int id) {
+  bool print_symbol = true;
+  int json_indent = 2;
+
   std::vector<bttrack::StackFrames> records;
   bttrack::Dump(id, records);
-  bool print_symbol = true;
   std::string report = bttrack::StackFramesToString(records, print_symbol);
-  printf("%s\n", report.c_str());
+  printf("%s", report.c_str());
+  report = bttrack::StackFramesToJson(records, json_indent);
+  printf("JSON:\n%s\n", report.c_str());
 }
 
 int main() {
