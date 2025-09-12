@@ -453,7 +453,8 @@ void StackFrameToJson(std::ostringstream& oss, const StackFrames& stack,
     oss << "{\"address\": " << (uintptr_t)frame->addr << ", \"function\": \""
         << frame->func << "\", \"file\": \"" << frame->file
         << "\", \"line\": " << frame->line << ", \"exec\": \"" << frame->exec
-        << "\", \"offset\": " << (uintptr_t)offset << "}";
+        << "\", \"offset\": " << (uintptr_t)offset << ", \"symbol\": \""
+        << frame->symbol << "\"}";
     if (f < stack.frames.size() - 1) {
       oss << ", ";
     }
