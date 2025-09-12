@@ -13,7 +13,7 @@ fi
 # ASAN_FLAGS="-fsanitize=address -fno-omit-frame-pointer"
 FASTMATH_FLAGS="-march=native -ffast-math -mavx2"
 
-CPP_FLAGS+=" -rdynamic -O1 -lpthread -std=c++14 $FASTMATH_FLAGS" # -g
+CPP_FLAGS+=" -g -ldl -rdynamic -O0 -lpthread -std=c++14 $FASTMATH_FLAGS"
 TGT_FLAGS="$TGT_FLAGS -Wall $ASAN_FLAGS"
 ASM_FLAGS="$ASM_FLAGS -masm=intel -fverbose-asm"
 

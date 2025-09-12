@@ -1,11 +1,13 @@
 #include "bttrack.h"
 
 #include <cxxabi.h>
+#include <dlfcn.h>
 #include <execinfo.h>
 
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -59,6 +61,102 @@ void Dump(uint8_t id, std::vector<StackFrames>& records) {
 
 void Record(uint8_t id) { GetInstance(id).Record(); }
 
+// find addr2line using which or whereis
+bool is_addr2line_available() {
+  static bool avail = [] {
+    FILE* pipe = popen("which addr2line", "r");
+    if (!pipe) {
+      pipe = popen("whereis -b addr2line | grep -q addr2line", "r");
+      if (!pipe) {
+        return false;
+      }
+    }
+    char buffer[256];
+    std::string result = "";
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+      result += buffer;
+    }
+    int status = pclose(pipe);
+    int code = WEXITSTATUS(status);
+    bool ok = code == 0 && !result.empty();
+    if (result[result.size() - 1] != '\n') {
+      result += '\n';
+    }
+    if (!ok) {
+      fprintf(stderr, "addr2line not found: returns %d output %s", code,
+              result.c_str());
+    } else {
+      fprintf(stderr, "addr2line found: %s", result.c_str());
+    }
+    return ok;
+  }();
+  return avail;
+}
+
+void lookup_addr2line(Frame& frame) noexcept {
+  static const bool unwind_inline = true;
+
+  if (!is_addr2line_available() || frame.faddr == nullptr) {
+    return;
+  }
+  void* offset = (void*)((char*)frame.addr - (char*)frame.faddr);
+  const size_t cmd_len = frame.exec.size() + 128;
+  char cmd[cmd_len];
+  // addr2line -e <exec> [-i] <offset>
+  snprintf(cmd, cmd_len - 1, "addr2line -e %s %s %p", frame.exec.c_str(),
+           (unwind_inline ? "-i" : ""), offset);
+  FILE* pipe = popen(cmd, "r");
+  if (!pipe) {
+    return;
+  }
+  char buffer[256];
+  std::string result = "";
+  while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+    result += buffer;
+  }
+  int status = pclose(pipe);
+  int code = WEXITSTATUS(status);
+  if (code != 0 || result.empty()) {
+    fprintf(stderr, "addr2line failed: returns %d output %s", code,
+            result.c_str());
+    return;
+  }
+
+  // result: "file:line\n", may returns multiple lines if code is optimized
+  bool parse_ok = false;
+  size_t eol = result.find('\n');  // only use the first line
+  if (eol == std::string::npos) {
+    eol = result.size();
+  }
+  size_t colon = result.rfind(':', eol);  // last ':'
+  if (colon < result.size() - 1) {
+    // try parse line number
+    size_t lstart = colon + 1;
+    if (result[lstart] == '?') {
+      frame.line = -1;
+      parse_ok = true;
+    } else {
+      try {
+        size_t lend = result.find_first_not_of("0123456789", lstart);
+        if (lend == std::string::npos) {
+          lend = eol;
+        }
+        frame.line = std::stoi(result.substr(colon + 1, lend - lstart));
+        parse_ok = frame.line >= 0;
+      } catch (...) {
+        // ignore parse error
+      }
+    }
+  }
+
+  if (parse_ok) {
+    frame.file = result.substr(0, colon);
+  }
+
+  // printf("popen(\"%s\") -> \"%s\"\n", cmd, result.c_str());
+  // printf("lookup_addr2line: %s:%d\n", frame.file.c_str(), frame.line);
+}
+
 /**
  * find "__libc_start_main" in
  * "/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xeb) [0x7f059d5a809b]""
@@ -88,38 +186,58 @@ bool find_func_in_symbol(const char* symbol, size_t& start, size_t& end) {
 Frame resolve_symbol(void* address, char* symbol) {
   Frame frame;
   frame.addr = address;
+  frame.faddr = nullptr;
 
   size_t start = std::string::npos;
   size_t end = std::string::npos;
   bool found = find_func_in_symbol(symbol, start, end);
   if (found) {
+    // found function name in symbols
+    frame.exec.assign(symbol, start - 1);
     frame.symbol = symbol;
     symbol[end] = '\0';  // null-terminate the substr
     int status;
     char* demangled =
         abi::__cxa_demangle(symbol + start, nullptr, nullptr, &status);
     if (status == 0 && demangled) {
-      frame.func_name = demangled;
+      frame.func = demangled;
       free(demangled);
     } else {
-      frame.func_name.assign(symbol + start);
+      frame.func.assign(symbol + start);
     }
   } else if (symbol) {
-    // function name symbol not found
+    // no function name in symbol
     frame.symbol = symbol;
-    frame.func_name = symbol;
+    frame.func = "__unknown__";
   } else {
-    frame.symbol = "(no symbol)";
-    frame.func_name = "__unknown__";
+    frame.symbol = "(nil)";
+    frame.func = "__unknown__";
   }
 
-  // @todo: addr2line
-  if (start > 1) {
-    frame.file_name.assign(symbol, start - 1);
-  } else {
-    frame.file_name = "__unknown__";
+  // remove ending " [0x7f64639e009b]"
+  size_t addr_start = frame.symbol.find(") [0x");
+  if (addr_start != std::string::npos) {
+    frame.symbol.erase(addr_start + 1);
   }
+
+  // get binary and its base address using dladdr()
+  Dl_info dl_info;
+  auto ret = dladdr(address, &dl_info);
+  if (ret) {
+    if (start > 1) {
+      // check exec name
+      assert(strncmp(dl_info.dli_fname, symbol, start - 1) == 0);
+    }
+    // printf("dladdr: %s@%p, %s@%p(+0x%lx)\n", dl_info.dli_fname,
+    //        dl_info.dli_fbase, dl_info.dli_sname, dl_info.dli_saddr,
+    //        (char*)dl_info.dli_saddr - (char*)dl_info.dli_fbase);
+    frame.faddr = dl_info.dli_fbase;
+  }
+
+  // get source code using addr2line
+  frame.file = "??";
   frame.line = -1;
+  lookup_addr2line(frame);
 
   // printf("[resolve] \"%s\" -> %s at %s:%d @ %p \n", frame.symbol.c_str(),
   //        frame.func_name.c_str(), frame.file_name.c_str(), frame.line,
@@ -205,13 +323,24 @@ void Tracker::Resolve(const std::vector<void*>& addr,
 void PrintStack(std::ostringstream& oss, const StackFrames& stack, double sum,
                 bool print_symbol) {
   oss << "recorded " << stack.count << " times (" << (stack.count / sum * 100.0)
-      << " %), stack:" << std::endl;
+      << "%), stack:" << std::endl;
   for (size_t f = 0; f < stack.frames.size(); f++) {
     auto* frame = stack.frames[f];
-    oss << "#" << f << (f < 10 ? "  " : " ") << frame->func_name << " at "
-        << frame->file_name << ":" << frame->line;
+    oss << "#" << f << (f < 10 ? "  " : " ") << frame->func;
+    oss << " at " << frame->file << ":";
+    if (frame->line >= 0) {
+      oss << frame->line;
+    } else {
+      oss << "?";
+    }
+    if (frame->faddr) {
+      void* offset = (void*)((char*)frame->addr - (char*)frame->faddr);
+      oss << " (" << frame->exec << "+" << offset << ")";
+    } else {
+      oss << " (" << frame->exec << "+?)";
+    }
     if (print_symbol) {
-      oss << ", " << frame->symbol;
+      oss << " <symbol=" << frame->symbol << ">";
     }
     oss << std::endl;
   }
@@ -227,7 +356,12 @@ std::string PrintStackFrames(const std::vector<StackFrames>& records,
     sum += it.count;
   }
   std::ostringstream oss;
-  oss << "Report: total " << sum << " records, in " << records.size()
+  oss << "Stack format: #N func at file:line (exec+offset)";
+  if (print_symbol) {
+    oss << " <symbol=...>";
+  }
+  oss << std::endl
+      << "Report: total " << sum << " records, in " << records.size()
       << " different stack frames:" << std::endl;
   for (size_t i = 0; i < records.size(); i++) {
     const auto& it = records[i];

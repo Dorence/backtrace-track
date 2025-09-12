@@ -8,10 +8,12 @@ namespace bttrack {
 // function information at address
 struct Frame {
   void* addr;
-  std::string symbol;
-  std::string func_name;
-  std::string file_name;
-  int line;
+  void* faddr;     // file base address
+  std::string symbol;  // mangeled symbol name
+  std::string func;    // function name
+  std::string exec;    // executable name
+  std::string file;    // source file name
+  int line;            // line of nearest symbol
 };
 
 // stack frames and its count
