@@ -4,14 +4,12 @@
 
 #include "bttrack.h"
 
-using namespace bttrack;
-
-void RunCall() { Record(0); }
+void RunCall() { bttrack::Record(0); }
 
 void RunCall2(int any) {
-  Record(0);
+  bttrack::Record(0);
   RunCall();
-  Record(0);
+  bttrack::Record(0);
 }
 
 template <typename T>
@@ -27,7 +25,7 @@ T RunCall3() {
 
 void Run() {
   for (int i = 0; i < 100; i++) {
-    Record(0);  // record 100 times
+    bttrack::Record(0);  // record 100 times
   }
   RunCall();                  // record 1 time
   int sum = RunCall3<int>();  // record 20+40 times
@@ -35,10 +33,10 @@ void Run() {
 }
 
 void Print(int id) {
-  std::vector<StackFrames> records;
-  Dump(id, records);
+  std::vector<bttrack::StackFrames> records;
+  bttrack::Dump(id, records);
   bool print_symbol = true;
-  std::string report = PrintStackFrames(records, print_symbol);
+  std::string report = bttrack::StackFramesToString(records, print_symbol);
   printf("%s\n", report.c_str());
 }
 

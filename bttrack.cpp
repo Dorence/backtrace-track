@@ -18,7 +18,8 @@ namespace bttrack {
 // array of stack pointers
 struct Stack {
   const std::vector<void*> addrs;
-  Stack(void** addrs_, int num) : addrs(addrs_, addrs_ + num) {}
+  int64_t score;
+  Stack(void** addrs_, int num) : addrs(addrs_, addrs_ + num), score(0) {}
   bool operator==(const Stack& other) const { return addrs == other.addrs; }
   bool operator<(const Stack& other) const {
     return addrs < other.addrs;  // lexicographical order
@@ -36,7 +37,7 @@ class Tracker {
   Tracker() = default;
   ~Tracker() = default;
 
-  void Record();
+  void Record(int64_t score);
   void Dump(std::vector<StackFrames>&);
 
  private:
@@ -59,9 +60,9 @@ void Dump(uint8_t id, std::vector<StackFrames>& records) {
   GetInstance(id).Dump(records);
 }
 
-void __attribute__((optimize("O1"))) Record(uint8_t id) {
+void __attribute__((optimize("O1"))) Record(uint8_t id, int64_t score) {
   // use O2/O3 will break Tracker::kSkipFrames
-  GetInstance(id).Record();
+  GetInstance(id).Record(score);
 }
 
 // find addr2line using which or whereis
@@ -105,9 +106,9 @@ void lookup_addr2line(Frame& frame) noexcept {
   void* offset = (void*)((char*)frame.addr - (char*)frame.faddr);
   const size_t cmd_len = frame.exec.size() + 128;
   char cmd[cmd_len];
-  // addr2line -e <exec> [-i] <offset>
-  snprintf(cmd, cmd_len - 1, "addr2line -e %s %s %p", frame.exec.c_str(),
-           (unwind_inline ? "-i" : ""), offset);
+  // addr2line [-i] -e <exec> <offset>
+  snprintf(cmd, cmd_len - 1, "addr2line %s-e %s %p",
+           (unwind_inline ? "-i " : ""), frame.exec.c_str(), offset);
   FILE* pipe = popen(cmd, "r");
   if (!pipe) {
     return;
@@ -117,6 +118,7 @@ void lookup_addr2line(Frame& frame) noexcept {
   while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
     result += buffer;
   }
+  // printf("popen(\"%s\") -> \"%s\"\n", cmd, result.c_str());
   int status = pclose(pipe);
   int code = WEXITSTATUS(status);
   if (code != 0 || result.empty()) {
@@ -124,8 +126,7 @@ void lookup_addr2line(Frame& frame) noexcept {
             result.c_str());
     return;
   }
-
-  // result: "file:line\n", may returns multiple lines if code is optimized
+  // result: "file:line\n", may have multiple lines if code is optimized
   bool parse_ok = false;
   size_t eol = result.find('\n');  // only use the first line
   if (eol == std::string::npos) {
@@ -151,18 +152,17 @@ void lookup_addr2line(Frame& frame) noexcept {
       }
     }
   }
-
   if (parse_ok) {
     frame.file = result.substr(0, colon);
   }
-
-  // printf("popen(\"%s\") -> \"%s\"\n", cmd, result.c_str());
   // printf("lookup_addr2line: %s:%d\n", frame.file.c_str(), frame.line);
+  // @todo add "-f" to retrieve function name if frame.func is "__unknown__"
 }
 
 /**
  * find "__libc_start_main" in
- * "/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xeb) [0x7f059d5a809b]""
+ * "/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xeb) [0x7f059d5a809b]"
+ * `start` points to next char of '(', `end` points to '+'
  */
 bool find_func_in_symbol(const char* symbol, size_t& start, size_t& end) {
   if (!symbol) {
@@ -209,10 +209,16 @@ Frame resolve_symbol(void* address, char* symbol) {
       frame.func.assign(symbol + start);
     }
   } else if (symbol) {
-    // no function name in symbol
+    // no function name in symbol, however, it could be "prog(+0xabcd)"
     frame.symbol = symbol;
+    if (start > 1) {
+      frame.exec.assign(symbol, start - 1);
+    } else {
+      frame.exec = "??";
+    }
     frame.func = "__unknown__";
   } else {
+    frame.exec = "??";
     frame.symbol = "(nil)";
     frame.func = "__unknown__";
   }
@@ -248,7 +254,7 @@ Frame resolve_symbol(void* address, char* symbol) {
   return frame;
 }
 
-void Tracker::Record() {
+void Tracker::Record(int64_t score) {
   void* addrs[kMaxStackFrames];
   // @ref https://linux.die.net/man/3/backtrace
   int num_frames = backtrace(addrs, kMaxStackFrames);
@@ -256,7 +262,13 @@ void Tracker::Record() {
   Stack stack_frames(addrs + kSkipFrames, num_frames - kSkipFrames);
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    all_records_[stack_frames]++;  // find or create
+    // find or create
+    auto it = all_records_.find(stack_frames);
+    if (it == all_records_.end()) {
+      all_records_.emplace(stack_frames, score);
+    } else {
+      it->second += score;
+    }
   }
 }
 
@@ -278,7 +290,9 @@ void Tracker::Dump(std::vector<StackFrames>& result) {
   result.resize(sort_idx.size());
   for (size_t i = 0; i < sort_idx.size(); i++) {
     result[i].count = sort_idx[i].first;
-    Resolve(sort_idx[i].second->addrs, result[i].frames);
+    const auto* sf = sort_idx[i].second;
+    result[i].score = sf->score;
+    Resolve(sf->addrs, result[i].frames);
   }
 }
 
@@ -349,8 +363,8 @@ void PrintStack(std::ostringstream& oss, const StackFrames& stack, double sum,
   }
 }
 
-std::string PrintStackFrames(const std::vector<StackFrames>& records,
-                             bool print_symbol) {
+std::string StackFramesToString(const std::vector<StackFrames>& records,
+                                bool print_symbol) {
   if (records.empty()) {
     return "Report: no records.";
   }
@@ -373,6 +387,15 @@ std::string PrintStackFrames(const std::vector<StackFrames>& records,
     oss << std::endl;
   }
   return oss.str();
+}
+
+std::string StackFramesToJson(const std::vector<StackFrames>& records,
+                              int indent) {
+  if (records.empty()) {
+    return "{\"sum\": 0, \"sum_score\": 0, \"records\": []}";
+  }
+  // @todo
+  return "";
 }
 
 }  // namespace bttrack
