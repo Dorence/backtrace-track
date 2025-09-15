@@ -19,8 +19,9 @@ static const char* kFuncUnknown = "<unknown>";
 
 // array of stack pointers
 struct Stack {
-  const std::vector<void*> addrs;
+  const FramePointers addrs;
   Stack(void** addrs_, int num) : addrs(addrs_, addrs_ + num) {}
+  Stack(const FramePointers& addrs) : addrs(addrs) {}
   bool operator==(const Stack& other) const { return addrs == other.addrs; }
   bool operator<(const Stack& other) const {
     return addrs < other.addrs;  // lexicographical order
@@ -43,17 +44,20 @@ class Tracker {
   ~Tracker() = default;
 
   void Record(int64_t score);
+  void RecordStack(const FramePointers& stack, int64_t score);
   void Dump(std::vector<StackFrames>&);
+
+  static bool GetBacktrace(FramePointers& stack);
 
  private:
   mutable std::mutex mutex_;
   // find frame according to addr
-  std::unordered_map<void*, Frame> all_frames_;
+  std::unordered_map<const void*, Frame> all_frames_;
   // stack frames and its statistics
   std::map<Stack, StackStat> all_records_;
 
   // batch resolve addr to frame, should hold lock
-  void Resolve(const std::vector<void*>&, std::vector<Frame*>&);
+  void Resolve(const FramePointers&, std::vector<Frame*>&);
 };
 
 static Tracker& GetInstance(uint8_t id) {
@@ -65,10 +69,23 @@ void Dump(uint8_t id, std::vector<StackFrames>& records) {
   GetInstance(id).Dump(records);
 }
 
-void __attribute__((optimize("O1"))) Record(uint8_t id, int64_t score) {
-  // use O2/O3 will break Tracker::kSkipFrames
+// use O2/O3 will break Tracker::kSkipFrames
+#define OPTIMIZE_O1 __attribute__((optimize("O1")))
+
+void OPTIMIZE_O1 Record(uint8_t id, int64_t score) {
   GetInstance(id).Record(score);
 }
+
+void OPTIMIZE_O1 Record(uint8_t id, const FramePointers& stack, int64_t score) {
+  GetInstance(id).RecordStack(stack, score);
+}
+
+bool OPTIMIZE_O1 GetBacktrace(FramePointers& stack) {
+  constexpr uint8_t id = std::numeric_limits<uint8_t>::max();
+  return GetInstance(id).GetBacktrace(stack);
+}
+
+#undef OPTIMIZE_O1
 
 /**
  * empty symbol: func = kFuncUnknown, return false
@@ -291,7 +308,10 @@ void Tracker::Record(int64_t score) {
   void* addrs[kMaxStackFrames];
   // @ref https://linux.die.net/man/3/backtrace
   int num_frames = backtrace(addrs, kMaxStackFrames);
-  assert(num_frames > kSkipFrames);
+  if (num_frames <= kSkipFrames) {
+    assert(false);
+    return;
+  }
   Stack stack_frames(addrs + kSkipFrames, num_frames - kSkipFrames);
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -304,6 +324,31 @@ void Tracker::Record(int64_t score) {
       it->second.score += score;
     }
   }
+}
+
+void Tracker::RecordStack(const FramePointers& stack, int64_t score) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  // find or create
+  Stack stack_frames(stack);
+  auto it = all_records_.find(stack_frames);
+  if (it == all_records_.end()) {
+    all_records_.emplace(stack_frames, StackStat{1, score});
+  } else {
+    it->second.count++;
+    it->second.score += score;
+  }
+}
+
+bool Tracker::GetBacktrace(FramePointers& stack) {
+  void* addrs[kMaxStackFrames];
+  stack.clear();
+  // @ref https://linux.die.net/man/3/backtrace
+  int num_frames = backtrace(addrs, kMaxStackFrames);
+  if (num_frames <= kSkipFrames) {
+    return false;
+  }
+  stack.assign(addrs + kSkipFrames, addrs + num_frames);
+  return true;
 }
 
 void Tracker::Dump(std::vector<StackFrames>& result) {
@@ -334,8 +379,7 @@ void Tracker::Dump(std::vector<StackFrames>& result) {
   }
 }
 
-void Tracker::Resolve(const std::vector<void*>& addr,
-                      std::vector<Frame*>& frames) {
+void Tracker::Resolve(const FramePointers& addr, std::vector<Frame*>& frames) {
   std::vector<size_t> not_found;
   not_found.reserve(addr.size());
 
@@ -357,15 +401,18 @@ void Tracker::Resolve(const std::vector<void*>& addr,
     const size_t num_lookup = not_found.size();
     void* addr_lookup[num_lookup];
     for (size_t i = 0; i < num_lookup; i++) {
-      addr_lookup[i] = addr[not_found[i]];
+      addr_lookup[i] = (void*)addr[not_found[i]];
     }
     // @ref https://linux.die.net/man/3/backtrace_symbols
     // current address to symbol, internal malloc-ed
     char** symbols = backtrace_symbols(addr_lookup, num_lookup);
-    for (size_t i = 0; i < num_lookup; i++) {
-      void* a = addr_lookup[i];
-      auto r = all_frames_.emplace(a, resolve_symbol(a, symbols[i]));
-      frames[not_found[i]] = &(r.first->second);
+    if (symbols) {
+      for (size_t i = 0; i < num_lookup; i++) {
+        void* a = addr_lookup[i];
+        auto r = all_frames_.emplace(a, resolve_symbol(a, symbols[i]));
+        frames[not_found[i]] = &(r.first->second);
+      }
+      free(symbols);
     }
   }
 
