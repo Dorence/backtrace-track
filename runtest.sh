@@ -16,7 +16,7 @@ fi
 # ASAN_FLAGS="-fsanitize=address -fno-omit-frame-pointer"
 BUILD_DIR="out"
 
-CPP_FLAGS+=" -g -ldl -rdynamic -O0 -lpthread -std=c++14 $@"
+CPP_FLAGS+=" -g -ldl -rdynamic -O3 -lpthread -std=c++14 $@"
 TGT_FLAGS="$TGT_FLAGS -Wall $ASAN_FLAGS"
 ASM_FLAGS="$ASM_FLAGS -masm=intel -fverbose-asm"
 

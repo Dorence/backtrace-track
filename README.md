@@ -3,11 +3,12 @@
 ## Requirements
 
 - C++ 11 and above. Should work fine on most linux distributions.
-- For backtrace resolution, `#include<execinfo.h>` (use `backtrace()` to get call stacks).
-- For symbol resolution, must be compiled with `-rdynamic` flag (use `backtrace_symbols()` to resolve). If you have `addr2line` installed, this condition may be relaxed.
-- [opt] For relative address resolution, must be compiled with `-ldl` flag (use `dl_addr()`).
-- [opt] For source code resolution, must be compiled with `-g` flag and install `addr2line` from [GNU Binutils](https://www.gnu.org/software/binutils/).
-- Recommeded to compile with `-O0` to disable function optimization.
+- `<execinfo.h>`: use `backtrace()` to get call stacks.
+- `<cxxabi.h>`: use `abi::__cxa_demangle()` to demangle symbol names.
+- For symbol resolution, compile with `-rdynamic` or have `addr2line` installed.
+- [opt] For relative address resolution, must be compiled with `-ldl` flag (use `dl_addr()` from `<dlfcn.h>`).
+- [opt] For source code resolution, must be compiled with `-g` flag and install `addr2line` from [GNU Binutils](https://www.gnu.org/software/binutils/), also use `popen` and `fork` (from `<unistd.h>`) to call. Tested on binutils version 2.31.1.
+- If compiled with `-O1` or above, please check `Frame::inlined_by` to get inlined frames.
 
 ## Build
 

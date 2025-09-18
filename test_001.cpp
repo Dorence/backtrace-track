@@ -4,7 +4,7 @@
 
 #include "bttrack.h"
 
-void RunCall() { bttrack::Record(0); }
+inline void RunCall() { bttrack::Record(0); }
 
 void RunCall2(int any) {
   bttrack::Record(0, 100);

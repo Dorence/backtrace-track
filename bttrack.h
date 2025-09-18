@@ -6,6 +6,8 @@
 
 namespace bttrack {
 
+extern const char* kFuncUnknown;  // "<unknown>"
+
 // function information at address
 struct Frame {
   const void* addr;    // caller address
@@ -15,6 +17,13 @@ struct Frame {
   std::string exec;    // executable name
   std::string file;    // source file name (?? if not available)
   int line;            // line of nearest symbol (-1 if not available)
+
+  struct Func {
+    std::string name;
+    std::string file;
+    int line;
+  };
+  std::vector<Func> inlined_by;  // inlined by these functions
 };
 
 // list of backtrace addresses
